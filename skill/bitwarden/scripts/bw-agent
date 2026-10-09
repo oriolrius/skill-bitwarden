@@ -15,7 +15,7 @@
 set -euo pipefail
 umask 077
 
-readonly BW_AGENT_VERSION="0.2.0"
+readonly BW_AGENT_VERSION="0.2.1"
 
 # Keys accepted from the config file. Keep in sync with config/schema.json
 # (enforced by the test suite).

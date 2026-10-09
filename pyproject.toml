@@ -1,6 +1,6 @@
 [project]
 name = "skill-bitwarden"
-version = "0.2.0"
+version = "0.2.1"
 description = "Portable, secure Bitwarden skill and tools for AI agent harnesses (Agent Skills, DeepSeek/OpenAI function calling, LangChain, deepagents)."
 readme = "README.md"
 license = "MIT"
