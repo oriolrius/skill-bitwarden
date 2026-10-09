@@ -1,0 +1,502 @@
+#!/usr/bin/env bash
+# bw-agent — single-shot, non-interactive Bitwarden CLI wrapper for AI agents.
+#
+#   bw-agent <bw subcommand and args...>     e.g.  bw-agent get password "github"
+#   bw-agent doctor                          check configuration (never prints secrets)
+#   bw-agent --wrapper-help | --wrapper-version
+#
+# It loads private configuration (environment first, then a mode-600 config
+# file), logs in with an API key, unlocks with the master password, caches the
+# session key, and finally runs `bw "$@"`. Concurrent callers are serialised
+# while (re)authenticating. Secrets never appear on any command line.
+#
+# Configuration reference: docs/configuration.md (public schema: config/schema.json).
+
+set -euo pipefail
+umask 077
+
+readonly BW_AGENT_VERSION="0.1.0"
+
+# Keys accepted from the config file. Keep in sync with config/schema.json
+# (enforced by the test suite).
+readonly ALLOWED_KEYS="BW_SERVER BW_CLIENTID BW_CLIENTSECRET BW_PASSWORD BW_PASSWORD_FILE \
+BW_PASSWORD_COMMAND BW_BIN_DIR BW_HARD_RESET BW_AGENT_READ_ONLY BW_AGENT_ALLOW_EXPORT \
+BW_AGENT_CACHE_DIR BW_AGENT_NO_CACHE BW_AGENT_LOCK_TIMEOUT BITWARDENCLI_APPDATA_DIR \
+NODE_EXTRA_CA_CERTS"
+
+say()  { printf 'bw-agent: %s\n' "$*" >&2; }
+die()  { say "ERROR: $1"; exit "${2:-1}"; }
+is_true() { case "${1:-}" in 1|true|TRUE|True|yes|YES|on|ON) return 0 ;; *) return 1 ;; esac; }
+
+# Fail closed on typos: an unrecognised value for a flag is an error, never
+# silently "false" (which would e.g. turn read-only mode off).
+validate_settings() {
+    local k v
+    for k in BW_AGENT_READ_ONLY BW_AGENT_ALLOW_EXPORT BW_AGENT_NO_CACHE BW_HARD_RESET; do
+        v="${!k:-}"
+        case "$v" in
+            ""|0|1|true|false|TRUE|FALSE|True|False|yes|no|YES|NO|on|off|ON|OFF) ;;
+            *) die "$k has an invalid value; use 0 or 1" 1 ;;
+        esac
+    done
+    [[ "${BW_AGENT_LOCK_TIMEOUT:-60}" =~ ^[0-9]+$ ]] || die "BW_AGENT_LOCK_TIMEOUT must be a number of seconds" 1
+}
+
+usage() {
+    cat <<'EOF'
+bw-agent — non-interactive Bitwarden CLI wrapper for AI agents
+
+Usage:
+  bw-agent <bw subcommand> [args...]   run any `bw` command with automatic auth
+  bw-agent doctor                      validate configuration (no secrets printed)
+  bw-agent --wrapper-help              this help
+  bw-agent --wrapper-version           wrapper version
+
+Examples:
+  bw-agent get password "example.com"
+  bw-agent list items --search "example"
+  bw-agent generate -ulns --length 24
+
+Blocked (managed by the wrapper): login, logout, lock, unlock, config, serve.
+`export` requires BW_AGENT_ALLOW_EXPORT=1. BW_AGENT_READ_ONLY=1 blocks writes.
+Configuration: see docs/configuration.md.
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+PROFILE="${BW_AGENT_PROFILE:-default}"
+[[ "$PROFILE" =~ ^[A-Za-z0-9._-]+$ ]] || die "BW_AGENT_PROFILE may only contain [A-Za-z0-9._-]"
+CONFIG_FILE="${BW_AGENT_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/bw-agent/${PROFILE}.env}"
+
+is_allowed_key() {
+    local k
+    for k in $ALLOWED_KEYS; do [ "$k" = "$1" ] && return 0; done
+    return 1
+}
+
+file_mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null; }
+
+# Parse KEY=VALUE lines. The file is NEVER sourced/evaluated: no command
+# substitution, no variable expansion. Only allowlisted keys are accepted and
+# values already present in the environment win over the file.
+load_config_file() {
+    local file="$1" line key val mode n=0
+    [ -e "$file" ] || return 0
+    [ -f "$file" ] || die "config path is not a regular file: $file"
+    [ -O "$file" ] || die "config file is not owned by the current user: $file"
+    mode="$(file_mode "$file")"
+    if [ -n "$mode" ] && (( 8#$mode & 8#077 )) && ! is_true "${BW_AGENT_ALLOW_INSECURE_CONFIG:-0}"; then
+        die "config file $file is accessible by group/others (mode $mode). Fix with: chmod 600 '$file'"
+    fi
+    while IFS= read -r line || [ -n "$line" ]; do
+        n=$((n + 1))
+        line="${line%$'\r'}"
+        line="${line#"${line%%[![:space:]]*}"}"          # ltrim
+        [ -z "$line" ] && continue
+        [ "${line:0:1}" = "#" ] && continue
+        line="${line#export }"
+        if [[ ! "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+            say "warning: $file:$n: ignoring malformed line"
+            continue
+        fi
+        key="${BASH_REMATCH[1]}"
+        val="${BASH_REMATCH[2]}"
+        if [[ "$val" =~ ^\"([^\"]*)\"[[:space:]]*(#.*)?$ ]] || [[ "$val" =~ ^\'([^\']*)\'[[:space:]]*(#.*)?$ ]]; then
+            val="${BASH_REMATCH[1]}"                       # quoted: kept verbatim
+        else
+            val="${val%%[[:space:]]#*}"                    # strip inline " # comment"
+            val="${val%"${val##*[![:space:]]}"}"           # rtrim
+        fi
+        if ! is_allowed_key "$key"; then
+            say "warning: $file:$n: ignoring unknown key '$key'"
+            continue
+        fi
+        if [ -z "${!key+x}" ]; then
+            printf -v "$key" '%s' "$val"
+            export "${key?}"
+        fi
+    done < "$file"
+}
+
+# ---------------------------------------------------------------------------
+# Locating the bw CLI (works under cron/systemd minimal PATH)
+# ---------------------------------------------------------------------------
+
+# The npm build of bw is a `#!/usr/bin/env node` script and needs node next to
+# it; the standalone native build does not.
+bw_dir_usable() {
+    local d="$1"
+    [ -x "$d/bw" ] || return 1
+    if head -n 1 "$d/bw" 2>/dev/null | grep -q 'node'; then
+        [ -x "$d/node" ] || command -v node >/dev/null 2>&1 || return 1
+    fi
+}
+
+ensure_bw_on_path() {
+    local p d
+    if [ -n "${BW_BIN_DIR:-}" ]; then
+        bw_dir_usable "$BW_BIN_DIR" || return 1
+        PATH="$BW_BIN_DIR:$PATH"; return 0
+    fi
+    if p="$(command -v bw 2>/dev/null)" && bw_dir_usable "$(dirname "$p")"; then
+        return 0
+    fi
+    # shellcheck disable=SC2012  # nvm version dirs are plain semver names
+    for d in $(ls -d "${NVM_DIR:-$HOME/.nvm}"/versions/node/*/bin 2>/dev/null | sort -rV) \
+             "$HOME/.local/bin" /usr/local/bin /opt/homebrew/bin /usr/bin /snap/bin; do
+        if bw_dir_usable "$d"; then PATH="$d:$PATH"; return 0; fi
+    done
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# Command policy
+# ---------------------------------------------------------------------------
+
+# Global flags bw accepts before the command. Any other leading option is
+# rejected so policy decisions can't be confused by option placement.
+GLOBAL_FLAGS=" --pretty --raw --response --cleanexit --quiet --nointeraction -h --help -v --version "
+
+# Prints the index (1-based) of the command word, or 0 when there is none.
+command_index() {
+    local a i=0
+    for a in "$@"; do
+        i=$((i + 1))
+        case "$GLOBAL_FLAGS" in *" $a "*) continue ;; esac
+        case "$a" in
+            -*) die "unexpected option '$a' before the command; put the bw command first" 2 ;;
+        esac
+        printf '%s' "$i"; return 0
+    done
+    printf '0'
+}
+
+# Commands allowed in read-only mode (allowlist: anything else is a write or
+# administrative action and is blocked).
+READ_ONLY_COMMANDS=" get list sync generate encode status completion help receive sdk-version "
+READ_ONLY_SEND_SUBCOMMANDS=" list get template receive "
+
+enforce_policy() {
+    local a idx cmd="" sub=""
+    for a in "$@"; do
+        case "$a" in
+            --session|--session=*) die "do not pass --session; bw-agent manages the session" 2 ;;
+        esac
+    done
+    idx="$(command_index "$@")"
+    if [ "$idx" -gt 0 ]; then
+        cmd="${!idx}"
+        if [ "$#" -gt "$idx" ]; then local n=$((idx + 1)); sub="${!n}"; fi
+    fi
+    case "$cmd" in
+        login|logout|lock|unlock|config|serve|update)
+            die "'bw $cmd' is managed by bw-agent and is blocked (use 'bw-agent doctor' to inspect state)" 2 ;;
+        export)
+            is_true "${BW_AGENT_ALLOW_EXPORT:-0}" \
+                || die "'bw export' dumps the whole vault and is blocked; set BW_AGENT_ALLOW_EXPORT=1 to allow it" 2 ;;
+    esac
+    if is_true "${BW_AGENT_READ_ONLY:-0}" && [ -n "$cmd" ]; then
+        if [ "$cmd" = send ]; then
+            # The token right after `send` must be a read-only subcommand;
+            # `bw send <text>` / `send -n ...` create Sends.
+            case "$READ_ONLY_SEND_SUBCOMMANDS" in
+                *" $sub "*) ;;
+                *) die "read-only mode (BW_AGENT_READ_ONLY=1): creating/changing a Send is blocked" 3 ;;
+            esac
+        else
+            case "$READ_ONLY_COMMANDS" in
+                *" $cmd "*) ;;
+                *) die "read-only mode (BW_AGENT_READ_ONLY=1): 'bw $cmd' is blocked" 3 ;;
+            esac
+        fi
+    fi
+}
+
+# Commands that never need an unlocked vault.
+needs_session() {
+    local idx cmd=""
+    idx="$(command_index "$@")"
+    [ "$idx" -gt 0 ] && cmd="${!idx}"
+    case "$cmd" in
+        ""|generate|encode|completion|help) return 1 ;;
+    esac
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Auth lifecycle
+# ---------------------------------------------------------------------------
+
+# Run bw without any of our secrets in its environment.
+bw_clean() {
+    env -u BW_PASSWORD -u BW_CLIENTSECRET -u BW_CLIENTID -u __BW_AGENT_PW bw "$@"
+}
+
+# `bw status` sees only the session under test (BW_SESSION from the caller of
+# this function, if any) and none of the long-lived secrets.
+status_json() { env -u BW_PASSWORD -u BW_CLIENTSECRET -u BW_CLIENTID -u __BW_AGENT_PW bw status 2>/dev/null || true; }
+
+json_field() { # json_field <json> <key>  -> string value (flat JSON only)
+    if [[ "$1" =~ \"$2\"[[:space:]]*:[[:space:]]*\"([^\"]*)\" ]]; then printf '%s' "${BASH_REMATCH[1]}"; fi
+}
+
+get_status() {
+    local raw st
+    raw="$(status_json)"
+    st="$(json_field "$raw" status)"
+    case "$st" in
+        unauthenticated|locked|unlocked) printf '%s' "$st" ;;
+        *) printf 'unknown' ;;
+    esac
+}
+
+norm_url() { printf '%s' "${1%/}" | tr '[:upper:]' '[:lower:]'; }
+
+check_server_matches() {
+    [ -n "${BW_SERVER:-}" ] || return 0
+    local current
+    current="$(json_field "$(status_json)" serverUrl)"
+    [ -n "$current" ] || return 0
+    if [ "$(norm_url "$current")" != "$(norm_url "$BW_SERVER")" ]; then
+        die "the bw CLI data dir is logged in to a different server than BW_SERVER. \
+Use a separate profile (BW_AGENT_PROFILE + BITWARDENCLI_APPDATA_DIR) for each server; \
+bw-agent will not switch servers on a shared CLI state." 4
+    fi
+}
+
+do_login() {
+    if [ -z "${BW_CLIENTID:-}" ] || [ -z "${BW_CLIENTSECRET:-}" ]; then
+        die "not logged in and BW_CLIENTID / BW_CLIENTSECRET are not configured (config: $CONFIG_FILE)" 5
+    fi
+    if [ -n "${BW_SERVER:-}" ]; then
+        bw_clean config server "$BW_SERVER" >/dev/null 2>&1 || say "warning: 'bw config server' failed"
+    fi
+    # bw reads BW_CLIENTID / BW_CLIENTSECRET from the environment.
+    env -u BW_PASSWORD -u __BW_AGENT_PW bw login --apikey >/dev/null 2>&1 || true
+}
+
+# Prints the session key on success. The master password is passed via an
+# environment variable name (--passwordenv) or a file path, never as argv.
+do_unlock() {
+    local out=""
+    if [ -n "${BW_PASSWORD:-}" ]; then
+        out="$(__BW_AGENT_PW="$BW_PASSWORD" env -u BW_PASSWORD -u BW_CLIENTSECRET -u BW_CLIENTID \
+            bw unlock --passwordenv __BW_AGENT_PW --raw 2>/dev/null)" || true
+    elif [ -n "${BW_PASSWORD_FILE:-}" ]; then
+        [ -r "$BW_PASSWORD_FILE" ] || die "BW_PASSWORD_FILE is not readable: $BW_PASSWORD_FILE" 5
+        out="$(bw_clean unlock --passwordfile "$BW_PASSWORD_FILE" --raw 2>/dev/null)" || true
+    elif [ -n "${BW_PASSWORD_COMMAND:-}" ]; then
+        local pw
+        pw="$(env -u BW_PASSWORD -u BW_CLIENTSECRET -u BW_CLIENTID bash -c "$BW_PASSWORD_COMMAND" 2>/dev/null)" || die "BW_PASSWORD_COMMAND failed" 5
+        pw="${pw%%$'\n'*}"
+        [ -n "$pw" ] || die "BW_PASSWORD_COMMAND returned an empty password" 5
+        out="$(__BW_AGENT_PW="$pw" env -u BW_PASSWORD -u BW_CLIENTSECRET -u BW_CLIENTID \
+            bw unlock --passwordenv __BW_AGENT_PW --raw 2>/dev/null)" || true
+        pw=""
+    else
+        die "no master password source configured (BW_PASSWORD, BW_PASSWORD_FILE or BW_PASSWORD_COMMAND)" 5
+    fi
+    out="${out//[[:space:]]/}"
+    [ -n "$out" ] && printf '%s' "$out"
+    return 0
+}
+
+do_relogin() {
+    # `bw logout` clears stored auth so re-login recovers from almost every
+    # auth fault without deleting the CLI data dir. Wiping that dir is
+    # destructive (it may be shared with interactive use) and is opt-in.
+    bw_clean logout >/dev/null 2>&1 || true
+    if is_true "${BW_HARD_RESET:-0}"; then
+        local appdata="${BITWARDENCLI_APPDATA_DIR:-}"
+        if [ -z "$appdata" ]; then
+            case "$(uname -s)" in
+                Darwin) appdata="$HOME/Library/Application Support/Bitwarden CLI" ;;
+                *) appdata="${XDG_CONFIG_HOME:-$HOME/.config}/Bitwarden CLI" ;;
+            esac
+        fi
+        say "BW_HARD_RESET=1: removing CLI data dir $appdata"
+        rm -rf -- "$appdata"
+    fi
+    clear_cache
+    do_login
+    do_unlock
+}
+
+# ---------------------------------------------------------------------------
+# Session cache + lock
+# ---------------------------------------------------------------------------
+
+CACHE_DIR="${BW_AGENT_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/bw-agent}"
+SESSION_CACHE="$CACHE_DIR/$PROFILE.session"
+LOCK_PATH="$CACHE_DIR/$PROFILE.lock"
+
+clear_cache() { rm -f -- "$SESSION_CACHE" 2>/dev/null || true; }
+
+write_cache() {
+    is_true "${BW_AGENT_NO_CACHE:-0}" && return 0
+    local tmp
+    tmp="$(mktemp "$CACHE_DIR/.session.XXXXXX")"
+    printf '%s' "$1" > "$tmp"
+    chmod 600 "$tmp"
+    mv -f -- "$tmp" "$SESSION_CACHE"
+}
+
+session_valid() { [ -n "$1" ] && [ "$(BW_SESSION="$1" get_status)" = "unlocked" ]; }
+
+cached_session_if_valid() {
+    is_true "${BW_AGENT_NO_CACHE:-0}" && return 1
+    [ -f "$SESSION_CACHE" ] || return 1
+    local cached
+    cached="$(cat -- "$SESSION_CACHE")"
+    session_valid "$cached" || return 1
+    printf '%s' "$cached"
+}
+
+LOCK_KIND=""
+
+acquire_lock() {
+    local timeout="${BW_AGENT_LOCK_TIMEOUT:-60}"
+    if [ -z "${_BW_AGENT_TEST_NO_FLOCK:-}" ] && command -v flock >/dev/null 2>&1; then
+        exec 9>"$LOCK_PATH"
+        LOCK_KIND="flock"
+        flock -w "$timeout" 9 || say "warning: could not acquire lock within ${timeout}s; continuing"
+        return 0
+    fi
+    # Portable fallback (e.g. macOS): mkdir is atomic. A lock dir older than
+    # the timeout is left over from a killed process and is reclaimed.
+    local waited=0
+    until mkdir "$LOCK_PATH.d" 2>/dev/null; do
+        if [ -n "$(find "$LOCK_PATH.d" -maxdepth 0 -mmin +"$(( (timeout + 59) / 60 ))" 2>/dev/null)" ]; then
+            rmdir "$LOCK_PATH.d" 2>/dev/null || true; continue
+        fi
+        if [ "$waited" -ge "$timeout" ]; then
+            say "warning: could not acquire lock within ${timeout}s; continuing"; return 0
+        fi
+        sleep 1; waited=$((waited + 1))
+    done
+    LOCK_KIND="mkdir"
+    trap 'rmdir "$LOCK_PATH.d" 2>/dev/null || true' EXIT
+}
+
+# Must run before exec'ing bw: exec skips EXIT traps and would otherwise keep
+# the lock (fd 9 / lock dir) held for the whole bw command or forever.
+release_lock() {
+    case "$LOCK_KIND" in
+        flock) exec 9>&- ;;
+        mkdir) rmdir "$LOCK_PATH.d" 2>/dev/null || true; trap - EXIT ;;
+    esac
+    LOCK_KIND=""
+}
+
+run_bw() { # run_bw <session> args...  (exec: exit code is bw's)
+    local s="$1"; shift
+    release_lock
+    exec env -u BW_PASSWORD -u BW_CLIENTSECRET -u BW_CLIENTID BW_SESSION="$s" bw "$@"
+}
+
+# ---------------------------------------------------------------------------
+# doctor
+# ---------------------------------------------------------------------------
+
+doctor() {
+    local ok=1 k st
+    echo "bw-agent $BW_AGENT_VERSION"
+    echo "profile:      $PROFILE"
+    if [ -e "$CONFIG_FILE" ]; then
+        echo "config file:  $CONFIG_FILE (mode $(file_mode "$CONFIG_FILE"))"
+    else
+        echo "config file:  $CONFIG_FILE (not present; using environment only)"
+    fi
+    echo "cache:        $SESSION_CACHE$(is_true "${BW_AGENT_NO_CACHE:-0}" && echo ' (disabled)')"
+    for k in $ALLOWED_KEYS; do
+        if [ -n "${!k:-}" ]; then
+            case "${!k}" in
+                \<*\>|*://vault.example.com|*00000000-0000-0000-0000-000000000000*)
+                    echo "  $k = PLACEHOLDER (still the template value)"; ok=0; continue ;;
+            esac
+            case "$k" in
+                BW_CLIENTSECRET|BW_PASSWORD|BW_CLIENTID) echo "  $k = <set>" ;;
+                *) echo "  $k = ${!k}" ;;
+            esac
+        fi
+    done
+    if ensure_bw_on_path; then
+        echo "bw:           $(command -v bw) ($(bw --version 2>/dev/null || echo '?'))"
+    else
+        echo "bw:           NOT FOUND (install the Bitwarden CLI or set BW_BIN_DIR)"; ok=0
+    fi
+    if [ -z "${BW_CLIENTID:-}" ] || [ -z "${BW_CLIENTSECRET:-}" ]; then
+        echo "api key:      missing BW_CLIENTID and/or BW_CLIENTSECRET"; ok=0
+    fi
+    if [ -z "${BW_PASSWORD:-}${BW_PASSWORD_FILE:-}${BW_PASSWORD_COMMAND:-}" ]; then
+        echo "unlock:       no master password source configured"; ok=0
+    fi
+    if command -v bw >/dev/null 2>&1; then
+        st="$(get_status 2>/dev/null || echo unknown)"
+        echo "vault status: $st (server: $(json_field "$(status_json)" serverUrl))"
+    fi
+    [ "$ok" = 1 ] && echo "result:       OK" && return 0
+    echo "result:       INCOMPLETE"; return 1
+}
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
+case "${1:-}" in
+    ""|--wrapper-help) usage; exit 0 ;;
+    --wrapper-version) echo "$BW_AGENT_VERSION"; exit 0 ;;
+esac
+
+load_config_file "$CONFIG_FILE"
+validate_settings
+# The wrapper owns the session: never trust or reuse a BW_SESSION inherited
+# from the caller (it would also confuse the lifecycle state machine).
+unset BW_SESSION
+if mkdir -p -- "$CACHE_DIR" 2>/dev/null; then chmod 700 "$CACHE_DIR" 2>/dev/null || true; fi
+
+if [ "${1:-}" = "doctor" ]; then doctor; exit $?; fi
+
+enforce_policy "$@"
+
+# Locate the CLI up front and fail fast: a missing/broken bw must never reach
+# any reset path.
+ensure_bw_on_path || die "Bitwarden CLI 'bw' not found (or its node runtime is missing). Install it or set BW_BIN_DIR." 127
+export PATH
+
+if ! needs_session "$@"; then
+    exec env -u BW_PASSWORD -u BW_CLIENTSECRET -u BW_CLIENTID bw "$@"
+fi
+
+check_server_matches
+[ -n "${BW_PASSWORD:-}${BW_PASSWORD_FILE:-}${BW_PASSWORD_COMMAND:-}" ] \
+    || die "no master password source configured (BW_PASSWORD, BW_PASSWORD_FILE or BW_PASSWORD_COMMAND; config: $CONFIG_FILE)" 5
+
+# Fast path: a valid cached session needs no lock.
+if CACHED="$(cached_session_if_valid)"; then run_bw "$CACHED" "$@"; fi
+
+# Slow path: (re)authenticate under an exclusive lock; re-check the cache once
+# we hold it because another caller may have refreshed it meanwhile.
+acquire_lock
+if CACHED="$(cached_session_if_valid)"; then run_bw "$CACHED" "$@"; fi
+
+SESSION=""
+case "$(get_status)" in
+    locked|unlocked) SESSION="$(do_unlock)" ;;
+    unauthenticated) do_login; SESSION="$(do_unlock)" ;;
+    *)               SESSION="$(do_relogin)" ;;
+esac
+
+if ! session_valid "$SESSION"; then
+    say "could not unlock with the current login; retrying with a full re-login"
+    SESSION="$(do_relogin)"
+fi
+
+session_valid "$SESSION" || die "all authentication attempts failed. Run 'bw-agent doctor'. \
+(CLI state was left intact; BW_HARD_RESET=1 wipes it if you suspect on-disk corruption.)" 6
+
+write_cache "$SESSION"
+run_bw "$SESSION" "$@"

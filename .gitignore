@@ -1,0 +1,48 @@
+# --- Private configuration & secrets (never commit) -------------------------
+.env
+.env.*
+*.env
+!*.env.example
+!.env.example
+.envrc
+secrets/
+*.secret
+*.secrets
+*.session
+*.pem
+*.key
+*.p12
+*.pfx
+*.der
+*.kdbx
+bw-agent.local.*
+data.json
+Bitwarden CLI/
+passkeys/
+# local denylist of personal strings for the public-safety check
+.public-safety-denylist
+# gitleaks reports may contain the secrets they found
+gitleaks-report*.json
+gitleaks-report*.sarif
+
+# --- Python / tooling ---------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/
+.coverage
+htmlcov/
+
+# --- Editors / OS / agents ----------------------------------------------------
+.idea/
+.vscode/
+*.swp
+.DS_Store
+.claude/settings.local.json
+.codegraph/
+.engram/

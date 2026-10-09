@@ -1,0 +1,60 @@
+# Local guard rails. Install once:  uv run pre-commit install --hook-type pre-commit --hook-type pre-push
+default_install_hook_types: [pre-commit, pre-push]
+default_stages: [pre-commit]
+
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.0
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: detect-private-key
+      - id: check-added-large-files
+        args: ["--maxkb=200"]
+        exclude: ^uv\.lock$
+      - id: check-merge-conflict
+      - id: check-json
+      - id: check-yaml
+      - id: check-toml
+      - id: check-executables-have-shebangs
+      - id: check-shebang-scripts-are-executable
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: forbid-new-submodules
+
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.11.0.1-1
+    hooks:
+      - id: shellcheck
+        exclude: ^tests/bats/
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.10
+    hooks:
+      - id: ruff
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: public-safety
+        name: public-safety (no personal/infra data)
+        entry: python3 scripts/check_public_safety.py
+        language: system
+        types: [text]
+      - id: public-safety-history
+        name: public-safety on full history (pre-push)
+        entry: python3 scripts/check_public_safety.py --history
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+      - id: gitleaks-history
+        name: gitleaks on full history (pre-push)
+        entry: gitleaks git --config .gitleaks.toml --redact --no-banner .
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]

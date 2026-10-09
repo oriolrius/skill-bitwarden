@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# Fake Bitwarden CLI used by the test suites. Simulates the subset of `bw`
+# behaviour bw-agent relies on. State lives in $FAKE_BW_STATE.
+#   FAKE_BW_CLIENTID / FAKE_BW_CLIENTSECRET / FAKE_BW_MASTER: accepted creds
+# Every invocation's argv is appended to $FAKE_BW_STATE/argv.log and its
+# environment to $FAKE_BW_STATE/env.log so tests can assert secrets never
+# leak into argv or into the final command's environment.
+set -euo pipefail
+
+S="${FAKE_BW_STATE:?FAKE_BW_STATE must be set}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ITEMS="${FAKE_BW_ITEMS:-$HERE/../items.json}"
+mkdir -p "$S"
+printf '%s\n' "$*" >> "$S/argv.log"
+# record if a lock fd leaked into bw (Linux only)
+if [ -e "/proc/$$/fd/9" ]; then echo "fd9 leaked: $*" >> "$S/fd.log"; fi
+{ printf -- '--- %s\n' "${1:-}"; env | grep -E '^(BW_|__BW_)' | sort || true; } >> "$S/env.log"
+
+server()   { cat "$S/server" 2>/dev/null || echo "null"; }
+logged_in(){ [ -f "$S/logged_in" ]; }
+unlocked() { [ -n "${BW_SESSION:-}" ] && [ -f "$S/session" ] && [ "$BW_SESSION" = "$(cat "$S/session")" ]; }
+need_unlocked() { unlocked || { echo "Vault is locked." >&2; exit 1; }; }
+
+srv_json() { local s; s="$(server)"; [ "$s" = null ] && echo null || echo "\"$s\""; }
+
+while [ $# -gt 0 ]; do case "$1" in --pretty|--raw|--response|--quiet|--nointeraction|--cleanexit) shift ;; *) break ;; esac; done
+cmd="${1:-}"; shift || true
+case "$cmd" in
+  --version) echo "2099.1.0-fake" ;;
+  status)
+    if ! logged_in; then st=unauthenticated; elif unlocked; then st=unlocked; else st=locked; fi
+    echo "{\"serverUrl\":$(srv_json),\"status\":\"$st\"}" ;;
+  config)
+    [ "${1:-}" = server ] || exit 1
+    if logged_in; then echo "Logout required before server config update." >&2; exit 1; fi
+    printf '%s' "$2" > "$S/server"; echo "Saved setting \`config\`." ;;
+  login)
+    [ "${1:-}" = --apikey ] || { echo "interactive login unsupported in fake" >&2; exit 1; }
+    if [ "${BW_CLIENTID:-}" = "${FAKE_BW_CLIENTID:-test-client-id}" ] && \
+       [ "${BW_CLIENTSECRET:-}" = "${FAKE_BW_CLIENTSECRET:-test-client-secret}" ]; then
+      touch "$S/logged_in"; echo "You are logged in!"
+    else echo "client_id or client_secret is incorrect. Try again." >&2; exit 1; fi ;;
+  logout) rm -f "$S/logged_in" "$S/session"; echo "You have logged out." ;;
+  unlock)
+    logged_in || { echo "You are not logged in." >&2; exit 1; }
+    pw=""; raw=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --passwordenv) pw="${!2:-}"; shift 2 ;;
+        --passwordfile) pw="$(head -n1 "$2")"; shift 2 ;;
+        --raw) raw=1; shift ;;
+        *) pw="$1"; shift ;;
+      esac
+    done
+    [ "$pw" = "${FAKE_BW_MASTER:-test-master-password}" ] || { echo "Invalid master password." >&2; exit 1; }
+    sess="fakesession$RANDOM$RANDOM"
+    printf '%s' "$sess" > "$S/session"
+    echo $(( $(cat "$S/unlock_count" 2>/dev/null || echo 0) + 1 )) > "$S/unlock_count"
+    if [ "$raw" = 1 ]; then printf '%s' "$sess"; else echo "export BW_SESSION=\"$sess\""; fi ;;
+  generate) echo "Gen3rated-Placeholder-Value" ;;
+  encode) base64 | tr -d '\n' ;;
+  sync) need_unlocked; echo "Syncing complete." ;;
+  list)
+    need_unlocked
+    [ "${1:-}" = items ] || { echo "[]"; exit 0; }
+    q=""; [ "${2:-}" = --search ] && q="${3:-}"
+    jq -c --arg q "$q" '[.[] | select(($q == "") or (.name | ascii_downcase | contains($q | ascii_downcase)))]' "$ITEMS" ;;
+  get)
+    what="${1:-}"; term="${2:-}"
+    if [ "$what" = template ]; then
+      case "$term" in
+        send.text) echo '{"name":"Send name","notes":null,"type":0,"text":{"text":"Text contained in the send.","hidden":false},"file":null,"maxAccessCount":null,"deletionDate":"2000-01-01T00:00:00.000Z","expirationDate":null,"password":null,"disabled":false,"hideEmail":false}' ;;
+        item) echo '{"organizationId":null,"collectionIds":null,"folderId":null,"type":1,"name":"Item name","notes":null,"favorite":false,"fields":[],"login":null,"reprompt":0}' ;;
+      esac; exit 0
+    fi
+    need_unlocked
+    matches="$(jq -c --arg q "$term" '[.[] | select(.id == $q or (.name | ascii_downcase | contains($q | ascii_downcase)))]' "$ITEMS")"
+    n="$(jq length <<<"$matches")"
+    [ "$n" -gt 0 ] || { echo "Not found." >&2; exit 1; }
+    [ "$n" -eq 1 ] || { echo "More than one result was found. Try getting a specific object by \`id\` instead." >&2; exit 1; }
+    item="$(jq -c '.[0]' <<<"$matches")"
+    case "$what" in
+      item) echo "$item" ;;
+      password) jq -r '.login.password' <<<"$item" ;;
+      username) jq -r '.login.username' <<<"$item" ;;
+      notes) jq -r '.notes' <<<"$item" ;;
+      uri) jq -r '.login.uris[0].uri' <<<"$item" ;;
+      totp)
+        if jq -e -r '.login.totp // empty' <<<"$item" >/dev/null; then echo "123456"
+        else echo "No TOTP available for this login." >&2; exit 1; fi ;;
+      *) echo "Unknown object." >&2; exit 1 ;;
+    esac ;;
+  create)
+    need_unlocked
+    payload="${2:-$(cat)}"
+    printf '%s' "$payload" > "$S/last_create.b64"
+    base64 -d <<<"$payload" | jq -c '. + {id: "00000000-0000-0000-0000-00000000c0de"}' ;;
+  edit)
+    need_unlocked
+    payload="${3:-$(cat)}"
+    printf '%s' "$payload" > "$S/last_edit.b64"
+    base64 -d <<<"$payload" ;;
+  send)
+    need_unlocked
+    sub="${1:-}"
+    case "$sub" in
+      template) "$0" get template "${2:-}" ;;
+      create)
+        payload="${2:-$(cat)}"
+        printf '%s' "$payload" > "$S/last_send.b64"
+        base64 -d <<<"$payload" | jq -c '{id: "00000000-0000-0000-0000-000000005e4d", name, deletionDate, maxAccessCount, accessUrl: "https://vault.example.com/#/send/AAAA/BBBB"}' ;;
+      list) echo "[]" ;;
+      *) echo "unsupported send subcommand in fake" >&2; exit 1 ;;
+    esac ;;
+  *) echo "fake bw: unsupported command '$cmd'" >&2; exit 1 ;;
+esac

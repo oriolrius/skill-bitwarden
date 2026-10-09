@@ -1,0 +1,64 @@
+[project]
+name = "skill-bitwarden"
+version = "0.1.0"
+description = "Portable, secure Bitwarden skill and tools for AI agent harnesses (Agent Skills, DeepSeek/OpenAI function calling, LangChain, deepagents)."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+keywords = ["bitwarden", "vaultwarden", "agent", "skill", "deepseek", "deepagents", "langchain", "llm"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: POSIX",
+    "Topic :: Security",
+]
+dependencies = []
+
+[project.optional-dependencies]
+langchain = ["langchain-core>=0.3.0"]
+deepagents = ["deepagents>=0.7.0; python_version >= '3.11'", "langchain-openai>=0.3.0"]
+openai = ["openai>=1.40.0"]
+
+[project.scripts]
+skill-bitwarden = "skill_bitwarden.__main__:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6", "langchain-core>=0.3.0", "pre-commit>=3.7"]
+
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/skill_bitwarden"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"skill/bitwarden" = "skill_bitwarden/_skill/bitwarden"
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "skill", "config", "docs", "examples", "tests", "install.sh", "README.md", "LICENSE", "SECURITY.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "SIM"]
+ignore = ["S101", "S603", "S607", "E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106", "S108"]
+"examples/**" = ["S105"]
+
+[tool.commitizen]
+name = "cz_conventional_commits"
+version_provider = "pep621"
+tag_format = "v$version"
+update_changelog_on_bump = true
+version_files = [
+    "src/skill_bitwarden/__init__.py:__version__",
+    "skill/bitwarden/scripts/bw-agent:BW_AGENT_VERSION",
+]

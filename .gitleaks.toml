@@ -1,0 +1,40 @@
+# Gitleaks configuration: default ruleset + Bitwarden-specific rules.
+# Run locally:  gitleaks git --config .gitleaks.toml --redact -v .
+#               gitleaks dir --config .gitleaks.toml --redact -v .
+
+title = "skill-bitwarden gitleaks config"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "bitwarden-api-client-id"
+description = "Bitwarden personal/organization API key client_id"
+regex = '''\b(?:user|organization)\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b'''
+keywords = ["user.", "organization."]
+[[rules.allowlists]]
+regexes = ['''(?:user|organization)\.0{8}-0{4}-0{4}-0{4}-0{12}''']
+
+[[rules]]
+id = "bitwarden-api-client-secret"
+description = "Bitwarden API key client_secret assigned to a variable"
+regex = '''(?i)\b(?:BW_CLIENTSECRET|client_secret)\b["']?\s*[:=]\s*["']?([A-Za-z0-9]{20,})'''
+secretGroup = 1
+keywords = ["bw_clientsecret", "client_secret"]
+
+[[rules]]
+id = "bitwarden-master-password"
+description = "Bitwarden master password assigned to BW_PASSWORD"
+regex = '''\bBW_PASSWORD\s*[:=]\s*["']?([^\s"'<>$]{6,})'''
+secretGroup = 1
+keywords = ["bw_password"]
+[[rules.allowlists]]
+regexes = ['''^(?:test-|fixture|wrong-|nope|<)''']
+regexTarget = "secret"
+
+[[rules]]
+id = "bitwarden-session-key"
+description = "Bitwarden CLI session key"
+regex = '''\bBW_SESSION\s*[:=]\s*["']?([A-Za-z0-9+/]{60,}={0,2})'''
+secretGroup = 1
+keywords = ["bw_session"]

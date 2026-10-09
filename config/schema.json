@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "bw-agent configuration",
+  "description": "Variables read by bw-agent from the environment or from the private config file ${XDG_CONFIG_HOME:-~/.config}/bw-agent/<profile>.env (mode 600). Environment variables take precedence over the file. Selector variables (BW_AGENT_PROFILE, BW_AGENT_CONFIG, BW_AGENT_ALLOW_INSECURE_CONFIG) are environment-only and are listed under x-environment-only.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "BW_SERVER": {
+      "type": "string",
+      "format": "uri",
+      "description": "Base URL of any Bitwarden-compatible server (Bitwarden cloud US/EU, self-hosted Bitwarden, Vaultwarden). If unset, the server already configured in the bw CLI data dir is used.",
+      "x-secret": false
+    },
+    "BW_CLIENTID": {
+      "type": "string",
+      "description": "Personal API key client_id (Web vault > Account settings > Security > Keys > View API key). Read natively by `bw login --apikey`.",
+      "x-secret": true
+    },
+    "BW_CLIENTSECRET": {
+      "type": "string",
+      "description": "Personal API key client_secret.",
+      "x-secret": true
+    },
+    "BW_PASSWORD": {
+      "type": "string",
+      "description": "Master password used to unlock the vault. Prefer BW_PASSWORD_FILE or BW_PASSWORD_COMMAND. Passed to bw via --passwordenv, never on the command line.",
+      "x-secret": true
+    },
+    "BW_PASSWORD_FILE": {
+      "type": "string",
+      "description": "Path to a file (mode 600) whose first line is the master password.",
+      "x-secret": false
+    },
+    "BW_PASSWORD_COMMAND": {
+      "type": "string",
+      "description": "Shell command that prints the master password on stdout (e.g. an OS keyring lookup). Only honoured from your own environment or your own mode-600 config file.",
+      "x-secret": false
+    },
+    "BW_BIN_DIR": {
+      "type": "string",
+      "description": "Directory containing the bw binary (and node, for the npm build). Only needed when auto-detection fails, e.g. under cron/systemd.",
+      "x-secret": false
+    },
+    "BITWARDENCLI_APPDATA_DIR": {
+      "type": "string",
+      "description": "Native bw CLI variable: data dir holding login state. Use a distinct dir per profile/server.",
+      "x-secret": false
+    },
+    "NODE_EXTRA_CA_CERTS": {
+      "type": "string",
+      "description": "Native Node.js variable: extra CA bundle (PEM) for self-hosted servers behind a private CA.",
+      "x-secret": false
+    },
+    "BW_AGENT_READ_ONLY": {
+      "type": "string",
+      "enum": ["0", "1", "true", "false"],
+      "default": "0",
+      "description": "Block every write operation (create, edit, delete, restore, move, import, share, creating Sends).",
+      "x-secret": false
+    },
+    "BW_AGENT_ALLOW_EXPORT": {
+      "type": "string",
+      "enum": ["0", "1", "true", "false"],
+      "default": "0",
+      "description": "Allow `bw export` (full vault dump). Blocked by default.",
+      "x-secret": false
+    },
+    "BW_AGENT_CACHE_DIR": {
+      "type": "string",
+      "description": "Directory for the session-key cache and lock (mode 700). Default ${XDG_CACHE_HOME:-~/.cache}/bw-agent.",
+      "x-secret": false
+    },
+    "BW_AGENT_NO_CACHE": {
+      "type": "string",
+      "enum": ["0", "1", "true", "false"],
+      "default": "0",
+      "description": "Do not persist the session key; unlock on every call (slower, nothing on disk).",
+      "x-secret": false
+    },
+    "BW_AGENT_LOCK_TIMEOUT": {
+      "type": "string",
+      "pattern": "^[0-9]+$",
+      "default": "60",
+      "description": "Seconds to wait for the re-authentication lock.",
+      "x-secret": false
+    },
+    "BW_HARD_RESET": {
+      "type": "string",
+      "enum": ["0", "1", "true", "false"],
+      "default": "0",
+      "description": "Allow deleting the bw CLI data dir when re-login keeps failing. Destructive; only for on-disk corruption.",
+      "x-secret": false
+    }
+  },
+  "x-environment-only": {
+    "BW_AGENT_PROFILE": "Profile name ([A-Za-z0-9._-]+, default 'default'). Selects the config file and the session cache.",
+    "BW_AGENT_CONFIG": "Explicit path to the config file (overrides the profile-derived path).",
+    "BW_AGENT_ALLOW_INSECURE_CONFIG": "Set to 1 to accept a config file readable by group/others (not recommended).",
+    "BW_AGENT_BIN": "Python/integration layer only: explicit path to the bw-agent executable.",
+    "BW_AGENT_TIMEOUT": "Python/integration layer only: seconds before a bw-agent call is aborted (default 120)."
+  }
+}

@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# bw-passkey-export — export the FIDO2 passkey private key(s) stored in a
+# Bitwarden login item to PEM files (mode 600).
+#
+#   bw-passkey-export <item-id> [output-dir]
+#
+# Output dir defaults to a fresh private temp dir. Files contain raw private
+# keys: shred them when done (`shred -u <dir>/*` or `rm -P` on macOS).
+# Requires: jq, openssl, base64.
+
+set -euo pipefail
+umask 077
+
+die() { printf 'bw-passkey-export: ERROR: %s\n' "$*" >&2; exit 1; }
+
+[ $# -ge 1 ] || die "usage: bw-passkey-export <item-id> [output-dir]"
+for c in jq openssl base64; do command -v "$c" >/dev/null 2>&1 || die "'$c' is required"; done
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BW_AGENT="${BW_AGENT_BIN:-$HERE/bw-agent}"
+ITEM_ID="$1"
+OUT="${2:-$(mktemp -d "${TMPDIR:-/tmp}/passkeys.XXXXXX")}"
+mkdir -p -- "$OUT" && chmod 700 "$OUT"
+
+ITEM="$("$BW_AGENT" get item "$ITEM_ID")"
+COUNT="$(jq '.login.fido2Credentials // [] | length' <<<"$ITEM")"
+[ "$COUNT" -gt 0 ] || die "item has no passkeys (login.fido2Credentials is empty)"
+NAME="$(jq -r '.name' <<<"$ITEM" | tr -c 'A-Za-z0-9._-' '_')"
+
+b64url_to_b64() {
+    local s
+    s="$(tr '_-' '/+' <<<"$1" | tr -d '\n')"
+    while [ $(( ${#s} % 4 )) -ne 0 ]; do s="$s="; done
+    printf '%s' "$s"
+}
+
+# Never leave raw DER key material behind, even if openssl fails.
+trap 'rm -f -- "$OUT"/*.der' EXIT
+
+for i in $(seq 0 $((COUNT - 1))); do
+    KEY="$(jq -r ".login.fido2Credentials[$i].keyValue" <<<"$ITEM")"
+    BASE="$OUT/${NAME}.${i}"
+    b64url_to_b64 "$KEY" | base64 -d > "$BASE.der" 2>/dev/null \
+        || b64url_to_b64 "$KEY" | base64 -D > "$BASE.der"
+    openssl pkcs8 -inform DER -in "$BASE.der" -nocrypt -out "$BASE.pem"
+    rm -f -- "$BASE.der"
+    chmod 600 "$BASE.pem"
+    jq ".login.fido2Credentials[$i] | del(.keyValue)" <<<"$ITEM" > "$BASE.json"
+    echo "$BASE.pem"
+done
+echo "Done. Private keys are in $OUT — shred them after use." >&2
