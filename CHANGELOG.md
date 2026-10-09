@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.2.1 (2026-10-09)
+
+### Fix
+
+- **bw-agent: authentication failures are now diagnosable** (#2). Previously
+  `bw`'s own error output from login/unlock was discarded, so a failure only
+  said "all authentication attempts failed" while `bw-agent doctor` reported
+  OK.
+  - `bw`'s output is printed under `bw reported:`, with secrets masked and
+    repeated lines collapsed. It is also kept in
+    `<cache>/<profile>.auth-error.log` (mode 600) until the next success.
+  - Unlock is retried once before and once after the full re-login. This
+    covers CLI/server combinations where the first unlock after login fails,
+    e.g. `KeyIdBackfillError` / 404 on version skew.
+  - `bw-agent doctor` now performs a real login/unlock (or validates the
+    cached session) and reports `AUTH FAILED` with `bw`'s output instead of a
+    configuration-only `OK`.
+  - New `BW_AGENT_DEBUG=1` shows `bw`'s output even on success.
+  - The Python tools return enough stderr for the detail to reach the model.
+
+### CI
+
+- Dependabot: bump `actions/checkout` to v7, `actions/setup-python` to v7 and
+  `astral-sh/setup-uv` to v7 (#1).
+
+### Fix
+
+- **bw-agent**: surface bw's auth errors, retry unlock, real auth check in doctor
+
 ## v0.2.0 (2026-10-09)
 
 First public release, published at

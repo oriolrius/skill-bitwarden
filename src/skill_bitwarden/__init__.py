@@ -12,7 +12,7 @@ from .paths import skill_dir, skills_root, wrapper_path
 from .redact import redact_item, summarize_item
 from .tools import AGENT_INSTRUCTIONS, dispatch, openai_tools, tool_specs
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 __all__ = [
     "AGENT_INSTRUCTIONS",
