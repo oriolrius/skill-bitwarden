@@ -49,6 +49,9 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          # Check the PR's real commits, not the synthetic refs/pull/N/merge
+          # commit GitHub authors with the PR author's account email.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
