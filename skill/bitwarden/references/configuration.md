@@ -26,6 +26,7 @@ them to the config file instead.
 | `BITWARDENCLI_APPDATA_DIR` | Separate bw CLI state dir (needed per server). |
 | `NODE_EXTRA_CA_CERTS` | Private CA bundle for self-hosted servers. |
 | `BW_BIN_DIR` | Where `bw` lives if not on PATH. |
+| `BW_AGENT_DEBUG=1` | Always show `bw`'s login/unlock output (secrets masked). |
 
 ## Troubleshooting
 
@@ -33,7 +34,7 @@ them to the config file instead.
 |---|---|
 | exit 127 | Install the Bitwarden CLI or set `BW_BIN_DIR`. |
 | exit 5 | API key or master-password source missing in the config. |
-| exit 6 | Wrong API key / master password, or server unreachable. Check `bw-agent doctor`. |
+| exit 6 | Authentication failed. bw-agent prints `bw`'s own error under "bw reported:". Typical causes: wrong API key or master password, unreachable server, or a bw CLI version incompatible with the server (e.g. `KeyIdBackfillError` / 404 right after login: align the CLI version with the server). `bw-agent doctor` repeats the real login/unlock and shows the same output. |
 | exit 4 | CLI state is logged in to another server: use a dedicated profile with its own `BITWARDENCLI_APPDATA_DIR`. |
 | `invalid_client` that survives re-login | Corrupted CLI state; the user may run once with `BW_HARD_RESET=1`. |
 | TLS errors on self-hosted | Set `NODE_EXTRA_CA_CERTS` to the CA bundle. |

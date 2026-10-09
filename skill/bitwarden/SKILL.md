@@ -35,8 +35,9 @@ Below, `bw-agent` stands for either form. Use absolute paths.
 4. **Never share secrets in plain text** (email, chat, tickets, commits,
    docs). Create a Bitwarden Send and share only its link (see *Sharing*).
 5. **Ask before** creating, editing or deleting items.
-6. First run or auth errors → run `bw-agent doctor` and report what it says.
-   Do not try to fix credentials yourself.
+6. First run or auth errors → report the `bw reported:` lines from the
+   error, and run `bw-agent doctor` (it performs a real login/unlock and shows
+   the same detail). Do not try to fix credentials yourself.
 
 ## Retrieve
 

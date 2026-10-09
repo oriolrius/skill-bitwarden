@@ -21,7 +21,7 @@ readonly BW_AGENT_VERSION="0.2.0"
 # (enforced by the test suite).
 readonly ALLOWED_KEYS="BW_SERVER BW_CLIENTID BW_CLIENTSECRET BW_PASSWORD BW_PASSWORD_FILE \
 BW_PASSWORD_COMMAND BW_BIN_DIR BW_HARD_RESET BW_AGENT_READ_ONLY BW_AGENT_ALLOW_EXPORT \
-BW_AGENT_CACHE_DIR BW_AGENT_NO_CACHE BW_AGENT_LOCK_TIMEOUT BITWARDENCLI_APPDATA_DIR \
+BW_AGENT_CACHE_DIR BW_AGENT_NO_CACHE BW_AGENT_LOCK_TIMEOUT BW_AGENT_DEBUG BITWARDENCLI_APPDATA_DIR \
 NODE_EXTRA_CA_CERTS"
 
 say()  { printf 'bw-agent: %s\n' "$*" >&2; }
@@ -32,7 +32,7 @@ is_true() { case "${1:-}" in 1|true|TRUE|True|yes|YES|on|ON) return 0 ;; *) retu
 # silently "false" (which would e.g. turn read-only mode off).
 validate_settings() {
     local k v
-    for k in BW_AGENT_READ_ONLY BW_AGENT_ALLOW_EXPORT BW_AGENT_NO_CACHE BW_HARD_RESET; do
+    for k in BW_AGENT_READ_ONLY BW_AGENT_ALLOW_EXPORT BW_AGENT_NO_CACHE BW_HARD_RESET BW_AGENT_DEBUG; do
         v="${!k:-}"
         case "$v" in
             ""|0|1|true|false|TRUE|FALSE|True|False|yes|no|YES|NO|on|off|ON|OFF) ;;
@@ -272,10 +272,10 @@ do_login() {
         die "not logged in and BW_CLIENTID / BW_CLIENTSECRET are not configured (config: $CONFIG_FILE)" 5
     fi
     if [ -n "${BW_SERVER:-}" ]; then
-        bw_clean config server "$BW_SERVER" >/dev/null 2>&1 || say "warning: 'bw config server' failed"
+        bw_clean config server "$BW_SERVER" >/dev/null 2>>"$AUTH_LOG" || say "warning: 'bw config server' failed"
     fi
     # bw reads BW_CLIENTID / BW_CLIENTSECRET from the environment.
-    env -u BW_PASSWORD -u __BW_AGENT_PW bw login --apikey >/dev/null 2>&1 || true
+    env -u BW_PASSWORD -u __BW_AGENT_PW bw login --apikey >/dev/null 2>>"$AUTH_LOG" || true
 }
 
 # Prints the session key on success. The master password is passed via an
@@ -284,23 +284,29 @@ do_unlock() {
     local out=""
     if [ -n "${BW_PASSWORD:-}" ]; then
         out="$(__BW_AGENT_PW="$BW_PASSWORD" env -u BW_PASSWORD -u BW_CLIENTSECRET -u BW_CLIENTID \
-            bw unlock --passwordenv __BW_AGENT_PW --raw 2>/dev/null)" || true
+            bw unlock --passwordenv __BW_AGENT_PW --raw 2>>"$AUTH_LOG")" || true
     elif [ -n "${BW_PASSWORD_FILE:-}" ]; then
         [ -r "$BW_PASSWORD_FILE" ] || die "BW_PASSWORD_FILE is not readable: $BW_PASSWORD_FILE" 5
-        out="$(bw_clean unlock --passwordfile "$BW_PASSWORD_FILE" --raw 2>/dev/null)" || true
+        out="$(bw_clean unlock --passwordfile "$BW_PASSWORD_FILE" --raw 2>>"$AUTH_LOG")" || true
     elif [ -n "${BW_PASSWORD_COMMAND:-}" ]; then
         local pw
-        pw="$(env -u BW_PASSWORD -u BW_CLIENTSECRET -u BW_CLIENTID bash -c "$BW_PASSWORD_COMMAND" 2>/dev/null)" || die "BW_PASSWORD_COMMAND failed" 5
+        pw="$(env -u BW_PASSWORD -u BW_CLIENTSECRET -u BW_CLIENTID bash -c "$BW_PASSWORD_COMMAND" 2>>"$AUTH_LOG")" || die "BW_PASSWORD_COMMAND failed" 5
         pw="${pw%%$'\n'*}"
         [ -n "$pw" ] || die "BW_PASSWORD_COMMAND returned an empty password" 5
         out="$(__BW_AGENT_PW="$pw" env -u BW_PASSWORD -u BW_CLIENTSECRET -u BW_CLIENTID \
-            bw unlock --passwordenv __BW_AGENT_PW --raw 2>/dev/null)" || true
+            bw unlock --passwordenv __BW_AGENT_PW --raw 2>>"$AUTH_LOG")" || true
         pw=""
     else
         die "no master password source configured (BW_PASSWORD, BW_PASSWORD_FILE or BW_PASSWORD_COMMAND)" 5
     fi
     out="${out//[[:space:]]/}"
-    [ -n "$out" ] && printf '%s' "$out"
+    # A session key is base64. Anything else on stdout is an error message
+    # (some bw builds print errors to stdout): keep it for diagnostics.
+    if [[ "$out" =~ ^[A-Za-z0-9+/=]{16,}$ ]]; then
+        printf '%s' "$out"
+    elif [ -n "$out" ]; then
+        printf '%s\n' "$out" >> "$AUTH_LOG"
+    fi
     return 0
 }
 
@@ -308,7 +314,7 @@ do_relogin() {
     # `bw logout` clears stored auth so re-login recovers from almost every
     # auth fault without deleting the CLI data dir. Wiping that dir is
     # destructive (it may be shared with interactive use) and is opt-in.
-    bw_clean logout >/dev/null 2>&1 || true
+    bw_clean logout >/dev/null 2>>"$AUTH_LOG" || true
     if is_true "${BW_HARD_RESET:-0}"; then
         local appdata="${BITWARDENCLI_APPDATA_DIR:-}"
         if [ -z "$appdata" ]; then
@@ -332,6 +338,9 @@ do_relogin() {
 CACHE_DIR="${BW_AGENT_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/bw-agent}"
 SESSION_CACHE="$CACHE_DIR/$PROFILE.session"
 LOCK_PATH="$CACHE_DIR/$PROFILE.lock"
+# bw's stderr from login/unlock (mode 600 via umask). Kept only until the
+# next successful authentication so failures can be diagnosed.
+AUTH_LOG="$CACHE_DIR/$PROFILE.auth-error.log"
 
 clear_cache() { rm -f -- "$SESSION_CACHE" 2>/dev/null || true; }
 
@@ -353,6 +362,64 @@ cached_session_if_valid() {
     cached="$(cat -- "$SESSION_CACHE")"
     session_valid "$cached" || return 1
     printf '%s' "$cached"
+}
+
+# Print the captured bw output with every configured secret masked.
+show_auth_log() {
+    local line secret prev="" count=0 n=0
+    [ -s "$AUTH_LOG" ] || return 0
+    say "bw reported:"
+    flush() {
+        [ "$count" -gt 0 ] || return 0
+        if [ "$count" -gt 1 ]; then
+            printf 'bw-agent:   | %s  (x%s)\n' "$prev" "$count" >&2
+        else
+            printf 'bw-agent:   | %s\n' "$prev" >&2
+        fi
+        n=$((n + 1))
+    }
+    while IFS= read -r line || [ -n "$line" ]; do
+        [ -n "$line" ] || continue
+        for secret in "${BW_PASSWORD:-}" "${BW_CLIENTSECRET:-}" "${BW_CLIENTID:-}"; do
+            if [ -n "$secret" ]; then line="${line//"$secret"/<redacted>}"; fi
+        done
+        if [ "$line" = "$prev" ]; then count=$((count + 1)); continue; fi
+        flush
+        if [ "$n" -ge 20 ]; then say "  (truncated; full log: $AUTH_LOG)"; return 0; fi
+        prev="$line"; count=1
+    done < "$AUTH_LOG"
+    flush
+    return 0
+}
+
+# Run the login/unlock sequence; print the session key on success, return 1
+# on failure. Unlock is retried once before and once after a full re-login:
+# some CLI/server combinations fail the first unlock after login (e.g. a
+# post-login key migration) and succeed immediately afterwards.
+authenticate() {
+    local s=""
+    : > "$AUTH_LOG"
+    case "$(get_status)" in
+        locked|unlocked) s="$(do_unlock)" ;;
+        unauthenticated) do_login; s="$(do_unlock)" ;;
+        *)               s="$(do_relogin)" ;;
+    esac
+    if ! session_valid "$s"; then
+        say "unlock failed; retrying once"
+        s="$(do_unlock)"
+    fi
+    if ! session_valid "$s"; then
+        say "could not unlock with the current login; retrying with a full re-login"
+        s="$(do_relogin)"
+    fi
+    if ! session_valid "$s"; then
+        say "unlock after re-login failed; retrying once"
+        s="$(do_unlock)"
+    fi
+    session_valid "$s" || return 1
+    is_true "${BW_AGENT_DEBUG:-0}" && show_auth_log
+    rm -f -- "$AUTH_LOG"
+    printf '%s' "$s"
 }
 
 LOCK_KIND=""
@@ -438,8 +505,28 @@ doctor() {
         st="$(get_status 2>/dev/null || echo unknown)"
         echo "vault status: $st (server: $(json_field "$(status_json)" serverUrl))"
     fi
-    [ "$ok" = 1 ] && echo "result:       OK" && return 0
-    echo "result:       INCOMPLETE"; return 1
+    if [ "$ok" != 1 ]; then
+        echo "result:       INCOMPLETE"; return 1
+    fi
+    # Configuration looks complete: prove it by authenticating for real, so
+    # doctor can't report OK while every command fails.
+    local s
+    if s="$(cached_session_if_valid)"; then
+        echo "auth:         OK (cached session is valid)"
+    else
+        acquire_lock
+        if s="$(authenticate)"; then
+            write_cache "$s"
+            echo "auth:         OK (logged in and unlocked)"
+        else
+            echo "auth:         FAILED — bw's error output follows on stderr"
+            show_auth_log
+            release_lock
+            echo "result:       AUTH FAILED"; return 1
+        fi
+        release_lock
+    fi
+    echo "result:       OK"; return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -483,20 +570,12 @@ if CACHED="$(cached_session_if_valid)"; then run_bw "$CACHED" "$@"; fi
 acquire_lock
 if CACHED="$(cached_session_if_valid)"; then run_bw "$CACHED" "$@"; fi
 
-SESSION=""
-case "$(get_status)" in
-    locked|unlocked) SESSION="$(do_unlock)" ;;
-    unauthenticated) do_login; SESSION="$(do_unlock)" ;;
-    *)               SESSION="$(do_relogin)" ;;
-esac
-
-if ! session_valid "$SESSION"; then
-    say "could not unlock with the current login; retrying with a full re-login"
-    SESSION="$(do_relogin)"
+if ! SESSION="$(authenticate)"; then
+    show_auth_log
+    die "all authentication attempts failed (see bw's output above; kept in $AUTH_LOG). \
+Check the API key, master password and server URL, and that the bw CLI version is compatible \
+with the server. CLI state was left intact; BW_HARD_RESET=1 wipes it if you suspect on-disk corruption." 6
 fi
-
-session_valid "$SESSION" || die "all authentication attempts failed. Run 'bw-agent doctor'. \
-(CLI state was left intact; BW_HARD_RESET=1 wipes it if you suspect on-disk corruption.)" 6
 
 write_cache "$SESSION"
 run_bw "$SESSION" "$@"

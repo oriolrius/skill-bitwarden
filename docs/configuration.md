@@ -70,6 +70,7 @@ BW_PASSWORD_COMMAND=op read op://Private/bitwarden/password                 # an
 | `BW_AGENT_NO_CACHE` | `0` | `1` keeps the session key off disk (unlock on every call). |
 | `BW_AGENT_CACHE_DIR` | `${XDG_CACHE_HOME:-~/.cache}/bw-agent` | Session cache + lock directory (created mode 700). |
 | `BW_AGENT_LOCK_TIMEOUT` | `60` | Seconds to wait for the re-authentication lock. |
+| `BW_AGENT_DEBUG` | `0` | `1` prints the bw CLI's login/unlock output (secrets masked) even on success. On failure it is always printed. |
 | `BW_HARD_RESET` | `0` | `1` lets recovery delete the bw CLI data dir. Only for on-disk corruption. |
 
 ### Environment-only selectors
@@ -128,5 +129,5 @@ in `PATH`, then `BW_BIN_DIR`, the newest `~/.nvm/versions/node/*/bin`,
 | 3 | blocked by read-only mode |
 | 4 | server mismatch with the CLI state |
 | 5 | missing configuration |
-| 6 | authentication failed |
+| 6 | authentication failed. `bw`'s own error output is printed (secrets masked) and kept in `<cache>/<profile>.auth-error.log` until the next success |
 | 127 | `bw` not found |

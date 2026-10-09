@@ -53,6 +53,16 @@ case "$cmd" in
       esac
     done
     [ "$pw" = "${FAKE_BW_MASTER:-test-master-password}" ] || { echo "Invalid master password." >&2; exit 1; }
+    # Failure injection: the first $FAKE_BW_UNLOCK_FAILS unlocks fail like a
+    # CLI/server version skew right after login (see issue #2).
+    fails=$(( $(cat "$S/unlock_failures" 2>/dev/null || echo 0) ))
+    if [ "$fails" -lt "${FAKE_BW_UNLOCK_FAILS:-0}" ]; then
+      echo $((fails + 1)) > "$S/unlock_failures"
+      echo 'key_id_backfill: Failed to post the user key id: Response(404, message: "")' >&2
+      echo "[Encrypted Migrator] Error running migrations for user: 0000 Error [KeyIdBackfillError]" >&2
+      if [ -n "${FAKE_BW_LEAK_SECRETS:-}" ]; then echo "debug: password=$pw secret=${BW_CLIENTSECRET:-}" >&2; fi
+      exit 1
+    fi
     sess="fakesession$RANDOM$RANDOM"
     printf '%s' "$sess" > "$S/session"
     echo $(( $(cat "$S/unlock_count" 2>/dev/null || echo 0) + 1 )) > "$S/unlock_count"
