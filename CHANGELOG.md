@@ -22,6 +22,8 @@
 
 ### CI
 
+- Public-safety history check runs on the PR head commits instead of GitHub's
+  synthetic merge commit, which carries the PR author's account email.
 - Dependabot: bump `actions/checkout` to v7, `actions/setup-python` to v7 and
   `astral-sh/setup-uv` to v7 (#1).
 
