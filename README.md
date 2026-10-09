@@ -74,7 +74,7 @@ Send/item payloads go through stdin.
 git clone https://github.com/<you>/skill-bitwarden.git && cd skill-bitwarden
 ./install.sh --init-config --bin          # ~/.config/bw-agent/default.env (600) + bw-agent on PATH
 $EDITOR ~/.config/bw-agent/default.env    # fill in server, API key, password source
-bw-agent doctor                           # validates config, never prints secrets
+bw-agent doctor                           # checks config + real login/unlock, never prints secrets
 bw-agent list items --search example | jq '.[].name'
 ```
 

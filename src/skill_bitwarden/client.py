@@ -45,7 +45,7 @@ class PolicyError(BitwardenError):
 
 def _clean_stderr(stderr: str) -> str:
     lines = [ln.strip() for ln in stderr.splitlines() if ln.strip()]
-    return " | ".join(lines[-5:]) or "no error output"
+    return " | ".join(lines[-15:]) or "no error output"
 
 
 def _env_flag(name: str, env: Mapping[str, str] | None = None) -> bool:

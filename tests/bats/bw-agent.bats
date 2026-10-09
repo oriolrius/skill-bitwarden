@@ -343,3 +343,60 @@ BW_AGENT_READ_ONLY=1   # block all vault writes"
     # auth helpers run while the lock is held; the user's command must not
     ! grep -q "leaked: sync" "$FAKE_BW_STATE/fd.log"
 }
+
+# --- issue #2: surface bw's auth errors ----------------------------------------
+
+@test "#2: a transient unlock failure is retried and succeeds" {
+    good_config
+    FAKE_BW_UNLOCK_FAILS=1 run "$BW_AGENT" get username "Example Service"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"retrying once"* ]]
+    [[ "$output" == *"alice@example.com"* ]]
+    [ ! -e "$XDG_CACHE_HOME/bw-agent/default.auth-error.log" ]
+}
+
+@test "#2: persistent auth failure shows bw's actual error" {
+    good_config
+    FAKE_BW_UNLOCK_FAILS=99 run "$BW_AGENT" sync
+    [ "$status" -eq 6 ]
+    [[ "$output" == *"bw reported:"* ]]
+    [[ "$output" == *"KeyIdBackfillError"* ]]
+    log="$XDG_CACHE_HOME/bw-agent/default.auth-error.log"
+    [ -f "$log" ]
+    mode="$(stat -c '%a' "$log" 2>/dev/null || stat -f '%Lp' "$log")"
+    [ "$mode" = "600" ]
+}
+
+@test "#2: secrets echoed by bw are masked in the shown error" {
+    good_config
+    FAKE_BW_UNLOCK_FAILS=99 FAKE_BW_LEAK_SECRETS=1 run "$BW_AGENT" sync
+    [ "$status" -eq 6 ]
+    [[ "$output" == *"password=<redacted>"* ]]
+    [[ "$output" != *"test-master-password"* ]]
+}
+
+@test "#2: doctor performs a real login/unlock and reports failures" {
+    good_config
+    FAKE_BW_UNLOCK_FAILS=99 run "$BW_AGENT" doctor
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"AUTH FAILED"* ]]
+    [[ "$output" == *"KeyIdBackfillError"* ]]
+    [[ "$output" != *"result:       OK"* ]]
+}
+
+@test "#2: doctor authenticates and caches the session on success" {
+    good_config
+    run "$BW_AGENT" doctor
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"auth:         OK (logged in and unlocked)"* ]]
+    [ -f "$XDG_CACHE_HOME/bw-agent/default.session" ]
+    run "$BW_AGENT" doctor
+    [[ "$output" == *"auth:         OK (cached session is valid)"* ]]
+}
+
+@test "#2: BW_AGENT_DEBUG=1 shows bw output even on success" {
+    good_config
+    FAKE_BW_UNLOCK_FAILS=1 BW_AGENT_DEBUG=1 run "$BW_AGENT" sync
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"KeyIdBackfillError"* ]]
+}

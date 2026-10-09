@@ -84,6 +84,13 @@
       "description": "Seconds to wait for the re-authentication lock.",
       "x-secret": false
     },
+    "BW_AGENT_DEBUG": {
+      "type": "string",
+      "enum": ["0", "1", "true", "false"],
+      "default": "0",
+      "description": "Print the bw CLI's login/unlock output (secrets masked) even when authentication succeeds. On failure it is always printed.",
+      "x-secret": false
+    },
     "BW_HARD_RESET": {
       "type": "string",
       "enum": ["0", "1", "true", "false"],

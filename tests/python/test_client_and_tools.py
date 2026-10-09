@@ -162,3 +162,12 @@ def test_text_fields_with_secret_names_are_redacted():
     out = redact_item(item)
     assert out["fields"][0]["value"] == REDACTED
     assert out["fields"][1]["value"] == "eu"
+
+
+def test_auth_failure_detail_reaches_the_model(fake_vault, monkeypatch):
+    # issue #2: bw's own error must surface, not just "authentication failed"
+    monkeypatch.setenv("FAKE_BW_UNLOCK_FAILS", "99")
+    out = json.loads(dispatch("bitwarden_sync", {}))
+    assert out["error"] == "bitwarden error"
+    assert "KeyIdBackfillError" in out["detail"]
+    assert "test-master-password" not in out["detail"]
