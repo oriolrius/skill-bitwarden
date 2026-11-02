@@ -1,6 +1,6 @@
 [project]
 name = "skill-bitwarden"
-version = "0.2.1"
+version = "0.3.0"
 description = "Portable, secure Bitwarden skill and tools for AI agent harnesses (Agent Skills, DeepSeek/OpenAI function calling, LangChain, deepagents)."
 readme = "README.md"
 license = "MIT"
@@ -58,6 +58,7 @@ name = "cz_conventional_commits"
 version_provider = "pep621"
 tag_format = "v$version"
 update_changelog_on_bump = true
+major_version_zero = true
 version_files = [
     "src/skill_bitwarden/__init__.py:__version__",
     "skill/bitwarden/scripts/bw-agent:BW_AGENT_VERSION",

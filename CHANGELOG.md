@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.3.0 (2026-11-02)
+
+### Breaking
+
+- **Python >= 3.11 is now required** (#12). `filelock` >= 4.2, the first
+  release outside the range affected by its security advisories, no longer
+  supports Python 3.10, so the 3.10 fork of `uv.lock` was stuck on a
+  vulnerable version. The `deepagents` extra loses its now-redundant
+  `python_version` marker.
+
+### Security
+
+- Lock refresh that clears every open Dependabot alert (#8, #9):
+  `pyasn1` 0.6.5 (quadratic-CPU DoS in BER decoding), `certifi` 2026.10.23,
+  `virtualenv` 21.15.2 and `filelock` 4.2.6. All of them are transitive or
+  dev-only dependencies; the package itself still has no required
+  dependencies.
+
+### Chore
+
+- `langchain-core` 1.7.3, `langchain-openai` 1.7.3, `openai` 3.42.1 and
+  `ruff` 0.17.3; `datetime.UTC` alias (ruff UP017 for py311).
+- Commitizen keeps 0.x versioning (`major_version_zero`).
+
+### Verified
+
+- CI passes on Ubuntu and macOS with Python 3.11 and 3.14 (was 3.10 and
+  3.13).
+
 ## v0.2.1 (2026-10-09)
 
 ### Fix
