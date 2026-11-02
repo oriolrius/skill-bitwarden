@@ -58,6 +58,7 @@ name = "cz_conventional_commits"
 version_provider = "pep621"
 tag_format = "v$version"
 update_changelog_on_bump = true
+major_version_zero = true
 version_files = [
     "src/skill_bitwarden/__init__.py:__version__",
     "skill/bitwarden/scripts/bw-agent:BW_AGENT_VERSION",
