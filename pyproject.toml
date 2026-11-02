@@ -5,7 +5,7 @@ description = "Portable, secure Bitwarden skill and tools for AI agent harnesses
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 keywords = ["bitwarden", "vaultwarden", "agent", "skill", "deepseek", "deepagents", "langchain", "llm"]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -16,7 +16,7 @@ dependencies = []
 
 [project.optional-dependencies]
 langchain = ["langchain-core>=0.3.0"]
-deepagents = ["deepagents>=0.7.0; python_version >= '3.11'", "langchain-openai>=0.3.0"]
+deepagents = ["deepagents>=0.7.0", "langchain-openai>=0.3.0"]
 openai = ["openai>=1.40.0"]
 
 [project.scripts]
@@ -43,7 +43,7 @@ testpaths = ["tests/python"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "S", "SIM"]

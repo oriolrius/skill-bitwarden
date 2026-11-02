@@ -65,7 +65,7 @@ Send/item payloads go through stdin.
   (`npm install -g @bitwarden/cli`, `brew install bitwarden-cli`, `snap install bw`,
   or the native binary).
 - A personal API key: Web vault → *Account settings → Security → Keys → View API key*.
-- Python ≥ 3.10 and [uv](https://docs.astral.sh/uv/), only for the Python
+- Python ≥ 3.11 and [uv](https://docs.astral.sh/uv/), only for the Python
   tools/adapters (deepagents needs ≥ 3.11).
 
 ### 2. Install the skill and create your private config

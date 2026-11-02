@@ -14,7 +14,7 @@ import os
 import subprocess
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -180,7 +180,7 @@ class BitwardenClient:
     ) -> dict[str, Any]:
         """Create an expiring Bitwarden Send and return its share URL."""
         template = self.run_json("send", "template", "send.text")
-        deletion = datetime.now(timezone.utc) + timedelta(days=expire_days)
+        deletion = datetime.now(UTC) + timedelta(days=expire_days)
         template.update(
             name=name,
             notes=notes,
